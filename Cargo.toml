@@ -8,3 +8,19 @@ clap = { version = "4.5.4", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "time"] }
 tokio-util = { version = "0.7.16", features = ["rt"] }
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false
+split-debuginfo = "off"
+
+[profile.release]
+split-debuginfo = "unpacked"
+lto = "thin"
+
+[profile.release-with-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
