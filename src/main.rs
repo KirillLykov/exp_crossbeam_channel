@@ -92,24 +92,38 @@ fn receiver_thread(rx: Receiver<(usize, u64)>) -> thread::JoinHandle<()> {
 
 async fn sender_task(task_id: usize, tx: Sender<(usize, u64)>, cancel: CancellationToken) {
     let mut counter: u64 = 0;
+    // Desync task wakeups (phase offset) and reduce burstiness (smaller batches, faster ticks).
+    const BATCH_SIZE: usize = 32;
+    const TICK_US: u64 = 250;
+    const PHASE_US: u64 = 5_000;
+    const YIELD_EVERY: usize = 8;
+
+    let phase_us = (task_id as u64 * 137) % PHASE_US;
+    let start = tokio::time::Instant::now() + Duration::from_micros(phase_us);
+    let mut ticker = tokio::time::interval_at(start, Duration::from_micros(TICK_US));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
-            _ = tokio::time::sleep(Duration::from_millis(1)) => {
+            _ = ticker.tick() => {
                 // send 128 messages every 1ms. so each task aims for 128k msgs/sec
-                for _ in 0..128 {
+                for i in 0..BATCH_SIZE {
                     counter += 1;
                     match tx.try_send((task_id, counter)) {
                         Ok(()) => {
                         }
                         Err(TrySendError::Full(_)) => {
+                            println!("Task {task_id}: channel full, yielding");
                             tokio::task::yield_now().await;
                         }
                         Err(TrySendError::Disconnected(_)) => {
                             cancel.cancel();
                             break;
                         }
+                    }
+                    if i % YIELD_EVERY == 0 {
+                        tokio::task::yield_now().await;
                     }
                 }
             }
@@ -120,13 +134,10 @@ async fn sender_task(task_id: usize, tx: Sender<(usize, u64)>, cancel: Cancellat
 fn main() {
     let args = Args::parse();
 
-    // Create channel
     let (tx, rx) = bounded::<(usize, u64)>(args.capacity);
 
-    // Start receiver thread
     let recv_handle = receiver_thread(rx);
 
-    // Create tokio runtime
     let rt = Builder::new_multi_thread()
         .worker_threads(args.worker_threads)
         .enable_time()
@@ -144,9 +155,8 @@ fn main() {
         }
         tasks.close();
 
-        // Drop the original sender in this scope; tasks still hold clones
         drop(tx);
-        // Run for requested duration
+
         tokio::time::sleep(Duration::from_secs(args.duration)).await;
 
         // Cancel all tasks
